@@ -1,0 +1,32 @@
+Write  a Windows powershell script code to scramble data for a txt file?
+Creating a data scrambling script
+Here's a simple PowerShell script that scrambles the characters in a text file while keeping the overall line structure intact.
+
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$InputPath,
+
+    [Parameter(Mandatory = $true)]
+    [string]$OutputPath
+)
+
+if (-not (Test-Path -Path $InputPath -PathType Leaf)) {
+    throw "Input file '$InputPath' does not exist."
+}
+
+Get-Content -Path $InputPath | ForEach-Object {
+    $chars = $_.ToCharArray()
+    $random = [System.Random]::new()
+    for ($i = $chars.Length - 1; $i -gt 0; $i--) {
+        $swap = $random.Next(0, $i + 1)
+        $temp = $chars[$i]
+        $chars[$i] = $chars[$swap]
+        $chars[$swap] = $temp
+    }
+    -join $chars
+} | Set-Content -Path $OutputPath
+
+Write-Host "Scrambled text written to $OutputPath"
+Save the script (for example as Scramble-Text.ps1), then run it:
+
+powershell -ExecutionPolicy Bypass -File .\Scramble-Text.ps1 -InputPath original.txt -OutputPath scrambled.txt
