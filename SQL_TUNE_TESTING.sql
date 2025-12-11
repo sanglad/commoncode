@@ -62,10 +62,21 @@ grouped_trx AS (
 ),
 opening AS (
     SELECT bt.group_trx_id,
-           SUM(NVL(arps.amount_due_original,0)) AS opening_balance
+           SUM(NVL(arps.amount_due_original,0))
+         - SUM(NVL(arrp_prior.amount_applied,0))
+         - SUM(NVL(arps.amount_credited * -1,0))
+         + SUM(NVL(adj_prior.amount,0))      AS opening_balance
     FROM   base_trx bt
     JOIN   ar_payment_schedules_all arps
            ON arps.customer_trx_id = bt.customer_trx_id
+    CROSS JOIN bounds b
+    LEFT JOIN ar_receivable_applications_all arrp_prior
+           ON arrp_prior.payment_schedule_id = arps.payment_schedule_id
+          AND arrp_prior.display = 'Y'
+          AND arrp_prior.apply_date < b.from_date
+    LEFT JOIN ar_adjustments_all adj_prior
+           ON adj_prior.customer_trx_id = bt.customer_trx_id
+          AND adj_prior.apply_date < b.from_date
     WHERE  bt.trx_class IN ('INV','DM')
     AND    arps.class   IN ('INV','DM')
     AND    bt.trx_period_num < :p_from_period
