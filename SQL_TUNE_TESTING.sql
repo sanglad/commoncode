@@ -35,113 +35,113 @@ bounds AS (
 ),
 base_trx AS (
     SELECT DISTINCT
-           xla.trx_id          AS customer_trx_id,
+           xla.trx_id                                AS customer_trx_id,
+           NVL(ract.previous_customer_trx_id, xla.trx_id) AS group_trx_id,
            xla.receivable_account,
-           ract.trx_number     AS invoice_number
-    FROM   xla_tbl xla,
-           ra_customer_trx_all ract
-    WHERE  ract.customer_trx_id = xla.trx_id
+           ract.trx_number                           AS invoice_number,
+           ract.trx_class                            AS trx_class,
+           ract.previous_customer_trx_id              AS parent_customer_trx_id
+    FROM   xla_tbl xla
+    JOIN   ra_customer_trx_all ract
+           ON ract.customer_trx_id = xla.trx_id
+),
+grouped_trx AS (
+    SELECT bt.group_trx_id,
+           COALESCE(
+               MAX(CASE
+                     WHEN bt.customer_trx_id = bt.group_trx_id
+                          OR bt.parent_customer_trx_id IS NULL
+                     THEN bt.invoice_number
+                   END),
+               MAX(bt.invoice_number)
+           ) AS invoice_number,
+           MAX(bt.receivable_account) AS receivable_account
+    FROM   base_trx bt
+    GROUP BY bt.group_trx_id
 ),
 opening AS (
-    SELECT bt.customer_trx_id,
-           SUM(NVL(arps.amount_due_original,0))
-         - SUM(NVL(arrp_prior.amount_applied,0))
-         - SUM(NVL(arps.amount_credited * -1,0))
-         + SUM(NVL(adj_prior.amount,0)) AS opening_balance
+    SELECT bt.group_trx_id,
+           SUM(NVL(arps.amount_due_original,0)) AS opening_balance
     FROM   base_trx bt
     JOIN   ar_payment_schedules_all arps
            ON arps.customer_trx_id = bt.customer_trx_id
-    LEFT JOIN ar_receivable_applications_all arrp_prior
-           ON arrp_prior.payment_schedule_id = arps.payment_schedule_id
-          AND arrp_prior.display = 'Y'
-          AND arrp_prior.apply_date < (SELECT from_date FROM bounds)
-    LEFT JOIN ar_adjustments_all adj_prior
-           ON adj_prior.customer_trx_id = bt.customer_trx_id
-          AND adj_prior.apply_date < (SELECT from_date FROM bounds)
-    WHERE  EXISTS (
+    WHERE  bt.trx_class IN ('INV','DM')
+    AND    arps.class   IN ('INV','DM')
+    AND    EXISTS (
               SELECT 1
               FROM   xla_tbl x
               WHERE  x.trx_id = bt.customer_trx_id
               AND    x.effective_period_num < :p_from_period
            )
-    GROUP BY bt.customer_trx_id
+    GROUP BY bt.group_trx_id
 ),
 additions AS (
-    SELECT arps.customer_trx_id,
+    SELECT bt.group_trx_id,
            SUM(NVL(arps.amount_due_original,0)) AS addition_amount
-    FROM   ar_payment_schedules_all arps
-    WHERE  arps.class IN ('INV','DM')
+    FROM   base_trx bt
+    JOIN   ar_payment_schedules_all arps
+           ON arps.customer_trx_id = bt.customer_trx_id
+    WHERE  bt.trx_class IN ('INV','DM')
+    AND    arps.class   IN ('INV','DM')
     AND    EXISTS (
               SELECT 1
               FROM   xla_tbl x
-              WHERE  x.trx_id = arps.customer_trx_id
+              WHERE  x.trx_id = bt.customer_trx_id
               AND    x.effective_period_num BETWEEN :p_from_period AND :p_to_period
            )
-    AND    NOT EXISTS (
-              SELECT 1
-              FROM   ar_receivable_applications_all arrp
-              WHERE  arrp.applied_payment_schedule_id = arps.payment_schedule_id
-              AND    arrp.display = 'Y'
-              AND    arrp.cash_receipt_id IS NOT NULL
-              AND    arrp.apply_date BETWEEN (SELECT from_date FROM bounds)
-                                       AND (SELECT to_date   FROM bounds)
-           )
-    GROUP BY arps.customer_trx_id
+    GROUP BY bt.group_trx_id
 ),
 payments AS (
-    SELECT arps.customer_trx_id,
+    SELECT bt.group_trx_id,
            -1 * SUM(NVL(arrp.amount_applied,0)) AS payment_amount
-    FROM   ar_payment_schedules_all arps
+    FROM   base_trx bt
+    JOIN   ar_payment_schedules_all arps
+           ON arps.customer_trx_id = bt.customer_trx_id
     JOIN   ar_receivable_applications_all arrp
            ON arrp.applied_payment_schedule_id = arps.payment_schedule_id
           AND arrp.display = 'Y'
-          AND arrp.cash_receipt_id IS NOT NULL
           AND arrp.apply_date BETWEEN (SELECT from_date FROM bounds)
                                   AND (SELECT to_date   FROM bounds)
-    WHERE  EXISTS (
+    WHERE  bt.trx_class IN ('INV','DM')
+    AND    arps.class   IN ('INV','DM')
+    AND    EXISTS (
               SELECT 1
               FROM   xla_tbl x
-              WHERE  x.trx_id = arps.customer_trx_id
+              WHERE  x.trx_id = bt.customer_trx_id
               AND    x.effective_period_num BETWEEN :p_from_period AND :p_to_period
            )
-    GROUP BY arps.customer_trx_id
+    GROUP BY bt.group_trx_id
 ),
 adjustments AS (
-    SELECT adj_src.customer_trx_id,
-           SUM(adj_src.amount) AS adjustment_amount
-    FROM   (
-              SELECT adj.customer_trx_id,
-                     NVL(adj.amount,0) AS amount
-              FROM   ar_adjustments_all adj
-              WHERE  adj.apply_date BETWEEN (SELECT from_date FROM bounds)
-                                       AND (SELECT to_date   FROM bounds)
-              AND    adj.amount < 0
-              AND    EXISTS (
-                        SELECT 1
-                        FROM   xla_tbl x
-                        WHERE  x.trx_id = adj.customer_trx_id
-                        AND    x.effective_period_num BETWEEN :p_from_period AND :p_to_period
-                     )
-              UNION ALL
-              SELECT arrp.applied_customer_trx_id AS customer_trx_id,
-                     -1 * NVL(arrp.amount_applied,0)               AS amount
-              FROM   ar_receivable_applications_all arrp
-              WHERE  arrp.display = 'Y'
-              AND    arrp.application_type = 'CREDIT_MEMO'
-              AND    arrp.apply_date BETWEEN (SELECT from_date FROM bounds)
-                                       AND (SELECT to_date   FROM bounds)
-              AND    EXISTS (
-                        SELECT 1
-                        FROM   xla_tbl x
-                        WHERE  x.trx_id = arrp.applied_customer_trx_id
-                        AND    x.effective_period_num BETWEEN :p_from_period AND :p_to_period
-                     )
-           ) adj_src
-    GROUP BY adj_src.customer_trx_id
+    SELECT NVL(src.group_trx_id, tgt.group_trx_id) AS group_trx_id,
+           -1 * SUM(NVL(arrp.amount_applied,0))    AS adjustment_amount
+    FROM   ar_receivable_applications_all arrp
+    JOIN   base_trx src
+           ON src.customer_trx_id = arrp.customer_trx_id
+    LEFT JOIN ar_payment_schedules_all src_arps
+           ON src_arps.customer_trx_id = src.customer_trx_id
+    LEFT JOIN base_trx tgt
+           ON tgt.customer_trx_id = arrp.applied_customer_trx_id
+    WHERE  arrp.display = 'Y'
+    AND    arrp.customer_trx_id IS NOT NULL
+    AND    NVL(arrp.amount_applied,0) <> 0
+    AND    arrp.apply_date BETWEEN (SELECT from_date FROM bounds)
+                              AND (SELECT to_date   FROM bounds)
+    AND    EXISTS (
+              SELECT 1
+              FROM   xla_tbl x
+              WHERE  x.trx_id = src.customer_trx_id
+              AND    x.effective_period_num BETWEEN :p_from_period AND :p_to_period
+           )
+    AND    (
+              src.trx_class = 'CM'
+           OR NVL(src_arps.amount_due_original,0) < 0
+           )
+    GROUP BY NVL(src.group_trx_id, tgt.group_trx_id)
 )
-SELECT bt.customer_trx_id,
-       bt.invoice_number,
-       bt.receivable_account,
+SELECT grp.group_trx_id                     AS customer_trx_id,
+       grp.invoice_number,
+       grp.receivable_account,
        NVL(op.opening_balance,0)            AS opening_balance,
        NVL(adds.addition_amount,0)          AS additions,
        NVL(pay.payment_amount,0)            AS payments,
@@ -150,10 +150,16 @@ SELECT bt.customer_trx_id,
      + NVL(adds.addition_amount,0)
      + NVL(pay.payment_amount,0)
      + NVL(adj.adjustment_amount,0)         AS ending_balance
-FROM   base_trx bt
-LEFT JOIN opening     op   ON op.customer_trx_id   = bt.customer_trx_id
-LEFT JOIN additions   adds ON adds.customer_trx_id = bt.customer_trx_id
-LEFT JOIN payments    pay  ON pay.customer_trx_id  = bt.customer_trx_id
-LEFT JOIN adjustments adj  ON adj.customer_trx_id  = bt.customer_trx_id
-WHERE  bt.customer_trx_id IN (105010,120001,202015,105010)
-ORDER BY bt.customer_trx_id;
+FROM   grouped_trx grp
+LEFT JOIN opening     op   ON op.group_trx_id   = grp.group_trx_id
+LEFT JOIN additions   adds ON adds.group_trx_id = grp.group_trx_id
+LEFT JOIN payments    pay  ON pay.group_trx_id  = grp.group_trx_id
+LEFT JOIN adjustments adj  ON adj.group_trx_id  = grp.group_trx_id
+WHERE  grp.group_trx_id IN (105010,120001,202015,105010)
+   OR EXISTS (
+          SELECT 1
+          FROM   base_trx bt_filter
+          WHERE  bt_filter.group_trx_id = grp.group_trx_id
+          AND    bt_filter.customer_trx_id IN (105010,120001,202015,105010)
+       )
+ORDER BY grp.group_trx_id;
