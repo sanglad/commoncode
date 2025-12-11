@@ -6,17 +6,26 @@ Parameters:
 */
 
 WITH period_bounds AS (
-    SELECT gp_from.start_date AS from_start_date,
-           gp_to.end_date     AS to_end_date,
-           gp_from.start_date - 1 AS opening_as_of_date
-    FROM   gl_ledgers gl,
-           gl_periods gp_from,
-           gl_periods gp_to
-    WHERE  gl.ledger_id         = :p_ledger_id
-    AND    gp_from.period_set_name = gl.period_set_name
-    AND    gp_to.period_set_name   = gl.period_set_name
-    AND    gp_from.period_name  = :p_from_period_name
-    AND    gp_to.period_name    = :p_to_period_name
+    SELECT MIN(CASE WHEN glps.period_name = :p_from_period_name THEN glps.start_date END)         AS from_start_date,
+           MAX(CASE WHEN glps.period_name = :p_to_period_name   THEN glps.end_date   END)         AS to_end_date,
+           MIN(CASE WHEN glps.period_name = :p_from_period_name THEN glps.start_date END) - 1     AS opening_as_of_date
+    FROM   xla_transaction_entities xlate
+    JOIN   xla_ae_headers           xlaah ON xlate.entity_id    = xlaah.entity_id
+    JOIN   xla_ae_lines             xlaal ON xlaah.ae_header_id = xlaal.ae_header_id
+                                         AND xlaah.ledger_id    = xlaal.ledger_id
+    JOIN   gl_period_statuses       glps  ON xlaah.period_name  = glps.period_name
+                                         AND xlaah.ledger_id    = glps.ledger_id
+    JOIN   gl_ledgers               gll   ON gll.ledger_id      = glps.ledger_id
+    JOIN   gl_code_combinations     gcc   ON gcc.code_combination_id = xlaal.code_combination_id
+    WHERE  xlate.entity_code             = 'TRANSACTIONS'
+    AND    xlaah.application_id          = 222
+    AND    xlaal.accounting_class_code   = 'RECEIVABLE'
+    AND    glps.closing_status          IN ('C','O','W')
+    AND    glps.application_id           = 222
+    AND    gll.ledger_id                 = :p_ledger_id
+    AND    xlaah.accounting_date BETWEEN glps.start_date AND glps.end_date
+    AND    glps.period_name IN (:p_from_period_name, :p_to_period_name)
+    AND    gcc.segment5                  = NVL(:p_account, gcc.segment5)
 ),
 
 base_trx AS (
