@@ -20,12 +20,12 @@ WITH ledger_periods AS (
     gps.year_start_date,
     gps.start_date,
     gps.end_date
-  FROM gl_period_statuses gps
-  JOIN gl_ledgers gl
-    ON gl.ledger_id = gps.ledger_id
+  FROM gl_period_statuses gps,
+       gl_ledgers gl
   WHERE gps.closing_status IN ('C','O','W')
     AND gps.application_id = 222
     AND gl.name = 'AHA USD Primary Ledger'
+    AND gl.ledger_id = gps.ledger_id
 ),
 bounds AS (
   SELECT
@@ -49,25 +49,25 @@ xla_full AS (
     glps.start_date        AS p_trx_from_date,
     glps.end_date          AS p_trx_to_date,
     xlaah.accounting_date  AS gl_date_date
-  FROM xla_transaction_entities xlate
-  JOIN xla_ae_headers xlaah
-    ON xlaah.entity_id = xlate.entity_id
-   AND xlaah.application_id = 222
-  JOIN xla_ae_lines xlaal
-    ON xlaal.ae_header_id = xlaah.ae_header_id
-   AND xlaal.ledger_id    = xlaah.ledger_id
-   AND xlaal.accounting_class_code = 'RECEIVABLE'
-  JOIN gl_period_statuses glps
-    ON glps.period_name = xlaah.period_name
-   AND glps.ledger_id   = xlaah.ledger_id
-   AND glps.application_id = 222
-   AND glps.closing_status IN ('C','O','W')
-  JOIN gl_ledgers gll
-    ON gll.ledger_id = glps.ledger_id
-   AND gll.name      = 'AHA USD Primary Ledger'
-  JOIN gl_code_combinations gcc
-    ON gcc.code_combination_id = xlaal.code_combination_id
+  FROM xla_transaction_entities xlate,
+       xla_ae_headers xlaah,
+       xla_ae_lines xlaal,
+       gl_period_statuses glps,
+       gl_ledgers gll,
+       gl_code_combinations gcc
   WHERE xlate.entity_code = 'TRANSACTIONS'
+    AND xlaah.application_id = 222
+    AND xlaah.entity_id = xlate.entity_id
+    AND xlaal.ae_header_id = xlaah.ae_header_id
+    AND xlaal.ledger_id    = xlaah.ledger_id
+    AND xlaal.accounting_class_code = 'RECEIVABLE'
+    AND glps.period_name = xlaah.period_name
+    AND glps.ledger_id   = xlaah.ledger_id
+    AND glps.application_id = 222
+    AND glps.closing_status IN ('C','O','W')
+    AND gll.ledger_id = glps.ledger_id
+    AND gll.name      = 'AHA USD Primary Ledger'
+    AND gcc.code_combination_id = xlaal.code_combination_id
     AND xlaah.accounting_date BETWEEN glps.start_date AND glps.end_date
     AND glps.effective_period_num BETWEEN (SELECT starting_effective_period_num FROM bounds)
                                      AND (SELECT effective_period_num          FROM bounds)
@@ -100,8 +100,8 @@ ar_inv AS (
           THEN NVL(ps.amount_due_original,0)
           ELSE 0
         END) AS inv_period_amount
-  FROM ar_payment_schedules_all ps
-  CROSS JOIN bounds b
+  FROM ar_payment_schedules_all ps,
+       bounds b
   WHERE ps.class IN ('INV','DM')
     AND ps.gl_date >= b.inception_date
     AND ps.gl_date <= b.p_trx_to_date
@@ -140,8 +140,8 @@ ar_apps AS (
           THEN NVL(app.amount_applied,0)
           ELSE 0
         END) AS cm_period_amount
-  FROM ar_receivable_applications_all app
-  CROSS JOIN bounds b
+  FROM ar_receivable_applications_all app,
+       bounds b
   WHERE app.status = 'APP'
     AND NVL(app.display,'Y') = 'Y'
     AND app.reversal_gl_date IS NULL
@@ -168,15 +168,15 @@ ar_adj AS (
           THEN NVL(adj.amount,0)
           ELSE 0
         END) AS adj_period_amount
-  FROM ar_adjustments_all adj
-  JOIN ar_payment_schedules_all ps
-    ON ps.payment_schedule_id = adj.payment_schedule_id
-  CROSS JOIN bounds b
+  FROM ar_adjustments_all adj,
+       ar_payment_schedules_all ps,
+       bounds b
   WHERE ps.class IN ('INV','DM')
     AND adj.status = 'A'
     AND NVL(adj.posted_flag,'N') = 'Y'
     AND adj.gl_date >= b.inception_date
     AND adj.gl_date <= b.p_trx_to_date
+    AND ps.payment_schedule_id = adj.payment_schedule_id
   GROUP BY ps.customer_trx_id
 ),
 
@@ -200,13 +200,13 @@ arps AS (
       THEN 'OP'
       ELSE pmt.status
     END AS inv_status
-  FROM arps1 a
-  CROSS JOIN bounds b
-  JOIN ra_customer_trx_all ract
-    ON ract.customer_trx_id = a.customer_trx_id
-  JOIN ar_payment_schedules_all pmt
-    ON pmt.customer_trx_id = a.customer_trx_id
-   AND pmt.due_date        = a.due_date
+  FROM arps1 a,
+       bounds b,
+       ra_customer_trx_all ract,
+       ar_payment_schedules_all pmt
+  WHERE ract.customer_trx_id = a.customer_trx_id
+    AND pmt.customer_trx_id  = a.customer_trx_id
+    AND pmt.due_date         = a.due_date
 )
 
 SELECT
@@ -245,23 +245,23 @@ SELECT
   + NVL(adj.adj_period_amount,0)
   ) AS ending_balance
 
-FROM ra_customer_trx_all ract
-JOIN xla_recv xrecv
-  ON xrecv.trx_id = ract.customer_trx_id
-LEFT JOIN arps
-  ON arps.customer_trx_id = ract.customer_trx_id
-LEFT JOIN ar_inv inv
-  ON inv.customer_trx_id = ract.customer_trx_id
-LEFT JOIN ar_apps apps
-  ON apps.customer_trx_id = ract.customer_trx_id
-LEFT JOIN ar_adj adj
-  ON adj.customer_trx_id = ract.customer_trx_id
-LEFT JOIN hz_cust_accounts hzca
-  ON hzca.cust_account_id = ract.bill_to_customer_id
-LEFT JOIN hz_parties hzp
-  ON hzp.party_id = hzca.party_id
+FROM ra_customer_trx_all ract,
+     xla_recv xrecv,
+     arps,
+     ar_inv inv,
+     ar_apps apps,
+     ar_adj adj,
+     hz_cust_accounts hzca,
+     hz_parties hzp
 
 WHERE 1=1
+  AND xrecv.trx_id = ract.customer_trx_id
+  AND arps.customer_trx_id(+) = ract.customer_trx_id
+  AND inv.customer_trx_id(+)  = ract.customer_trx_id
+  AND apps.customer_trx_id(+) = ract.customer_trx_id
+  AND adj.customer_trx_id(+)  = ract.customer_trx_id
+  AND hzca.cust_account_id(+) = ract.bill_to_customer_id
+  AND hzp.party_id(+)         = hzca.party_id
   AND ract.customer_trx_id IN (140023,140025,140028,109043,112014)
   AND (
        NVL(inv.inv_opening_amount,0)       <> 0
