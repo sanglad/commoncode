@@ -20,19 +20,39 @@ WITH ledger_periods AS (
     AND gps.application_id = 222
     AND gl.name = 'AHA USD Primary Ledger'
 ),
-bounds AS (
+from_bounds AS (
   SELECT
     ledger_id,
     period_year,
-    MIN(starting_effective_period_num) AS starting_effective_period_num,
+    starting_effective_period_num,
     MIN(year_start_date) AS inception_date,
-    MIN(CASE WHEN effective_period_num = :P_FROM_PERIOD THEN start_date END) AS p_trx_from_date,
-    MAX(CASE WHEN effective_period_num = :P_TO_PERIOD   THEN end_date   END) AS p_trx_to_date,
-    :P_FROM_PERIOD AS p_from_period,
-    :P_TO_PERIOD   AS p_to_period
+    MIN(start_date)      AS p_trx_from_date
   FROM ledger_periods
-  WHERE effective_period_num BETWEEN :P_FROM_PERIOD AND :P_TO_PERIOD
+  WHERE effective_period_num = :P_FROM_PERIOD
+  GROUP BY ledger_id, period_year, starting_effective_period_num
+),
+to_bounds AS (
+  SELECT
+    ledger_id,
+    period_year,
+    MAX(end_date) AS p_trx_to_date
+  FROM ledger_periods
+  WHERE effective_period_num = :P_TO_PERIOD
   GROUP BY ledger_id, period_year
+),
+bounds AS (
+  SELECT
+    f.ledger_id,
+    f.period_year,
+    :P_TO_PERIOD AS effective_period_num,
+    f.starting_effective_period_num,
+    f.inception_date,
+    f.p_trx_from_date,
+    t.p_trx_to_date
+  FROM from_bounds f
+  JOIN to_bounds   t
+    ON t.ledger_id   = f.ledger_id
+   AND t.period_year = f.period_year
 ),
 
 xla_full AS (
@@ -64,7 +84,7 @@ xla_full AS (
   AND    xlaal.code_combination_id   = gcc.code_combination_id
   AND    xlaah.accounting_date BETWEEN glps.start_date AND glps.end_date
   AND    glps.effective_period_num BETWEEN (SELECT starting_effective_period_num FROM bounds)
-                                      AND (SELECT p_to_period FROM bounds)
+                                      AND (SELECT effective_period_num FROM bounds)
   AND    gcc.segment5 = NVL(:p_account, gcc.segment5)
 ),
 xla_recv AS (
