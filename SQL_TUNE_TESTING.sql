@@ -109,24 +109,24 @@ SELECT r.role_name,
 --   User -> directly assigned Role -> inherited Duty/Child Roles
 --        -> Privileges on those Roles -> Permission Actions
 -- ============================================================================
-WITH user_roles AS (
+WITH user_roles (user_id, top_role_id, ur_start, ur_end) AS (
     SELECT urm.user_id,
-           urm.role_id                           AS top_role_id,
-           urm.effective_start_date              AS ur_start,
-           urm.effective_end_date                AS ur_end
+           urm.role_id,
+           urm.effective_start_date,
+           urm.effective_end_date
       FROM fusion.ase_user_role_mbr urm
      WHERE (urm.effective_end_date >= SYSDATE OR urm.effective_end_date IS NULL)
 ),
-role_tree AS (
+role_tree (user_id, top_role_id, effective_role_id, depth) AS (
     SELECT ur.user_id,
            ur.top_role_id,
-           ur.top_role_id                        AS effective_role_id,
-           1                                     AS depth
+           ur.top_role_id,
+           1
       FROM user_roles ur
     UNION ALL
     SELECT rt.user_id,
            rt.top_role_id,
-           rrm.child_role_id                     AS effective_role_id,
+           rrm.child_role_id,
            rt.depth + 1
       FROM role_tree rt
       JOIN fusion.ase_role_role_mbr rrm
@@ -167,22 +167,22 @@ SELECT DISTINCT
 -- QUERY 6 (FILTERED): Full Chain for a Specific User
 -- Replace 'JOHN.DOE' with the target username.
 -- ============================================================================
-WITH user_roles AS (
+WITH user_roles (user_id, top_role_id) AS (
     SELECT urm.user_id,
-           urm.role_id                           AS top_role_id
+           urm.role_id
       FROM fusion.ase_user_role_mbr urm
      WHERE (urm.effective_end_date >= SYSDATE OR urm.effective_end_date IS NULL)
 ),
-role_tree AS (
+role_tree (user_id, top_role_id, effective_role_id, depth) AS (
     SELECT ur.user_id,
            ur.top_role_id,
-           ur.top_role_id                        AS effective_role_id,
-           1                                     AS depth
+           ur.top_role_id,
+           1
       FROM user_roles ur
     UNION ALL
     SELECT rt.user_id,
            rt.top_role_id,
-           rrm.child_role_id                     AS effective_role_id,
+           rrm.child_role_id,
            rt.depth + 1
       FROM role_tree rt
       JOIN fusion.ase_role_role_mbr rrm
