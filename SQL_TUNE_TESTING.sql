@@ -471,3 +471,249 @@ SELECT DISTINCT
           eff_r.role_name,
           pv.privilege_name,
           perm.action;
+
+
+-- ============================================================================
+-- ============================================================================
+-- UNIFIED QUERIES: User -> Role -> Privilege -> Menu / Function Access
+-- ============================================================================
+-- These queries combine the ASE security chain (users, roles, privileges,
+-- actions) with the FND menu chain (grants, menus, menu entries, functions)
+-- into a single result set.
+--
+-- Bridge between the two:
+--   FND_GRANTS.grantee_key  =  ASE_ROLE_VL.role_code
+--   FND_GRANTS.menu_id      -> FND_MENUS (aggregate privilege / menu group)
+--   FND_MENU_ENTRIES         -> individual function entries in that menu
+--   FND_FORM_FUNCTIONS       -> page / taskflow / URL the user can access
+-- ============================================================================
+
+
+-- ============================================================================
+-- QUERY 12: COMPLETE VIEW - User, Role, Privilege, Action, Menu & Function
+-- Shows every user with:
+--   * Their directly assigned role
+--   * The effective (inherited) duty role holding the privilege
+--   * The privilege name, code, and permitted action
+--   * The menu (aggregate privilege) granted to that role via FND_GRANTS
+--   * Each function/page inside that menu the user can reach
+-- ============================================================================
+WITH user_roles (user_id, top_role_id) AS (
+    SELECT urm.user_id,
+           urm.role_id
+      FROM fusion.ase_user_role_mbr urm
+     WHERE (urm.effective_end_date >= SYSDATE OR urm.effective_end_date IS NULL)
+),
+role_tree (user_id, top_role_id, effective_role_id, depth) AS (
+    SELECT ur.user_id,
+           ur.top_role_id,
+           ur.top_role_id,
+           1
+      FROM user_roles ur
+    UNION ALL
+    SELECT rt.user_id,
+           rt.top_role_id,
+           rrm.child_role_id,
+           rt.depth + 1
+      FROM role_tree rt
+      JOIN fusion.ase_role_role_mbr rrm
+        ON rrm.parent_role_id = rt.effective_role_id
+     WHERE (rrm.effective_end_date >= SYSDATE OR rrm.effective_end_date IS NULL)
+       AND rt.depth < 10
+)
+SELECT DISTINCT
+       u.user_name,
+       u.user_display_name,
+       -- Role info
+       top_r.role_name                               AS assigned_role,
+       top_r.role_code                               AS assigned_role_code,
+       eff_r.role_name                               AS effective_role,
+       eff_r.role_code                               AS effective_role_code,
+       -- Privilege & action
+       pv.privilege_name,
+       pv.privilege_code,
+       perm.resource_type_name,
+       perm.action,
+       -- Menu access (aggregate privilege)
+       m.menu_name                                   AS menu_name,
+       -- Function / page details
+       ff.function_name                              AS function_code,
+       ff.user_function_name                         AS function_display_name,
+       ff.type                                       AS function_type,
+       ff.web_html_call                              AS function_url,
+       ff.description                                AS function_description
+  FROM role_tree                  rt
+  JOIN fusion.ase_user_vl         u      ON u.user_id      = rt.user_id
+  JOIN fusion.ase_role_vl         top_r  ON top_r.role_id  = rt.top_role_id
+  JOIN fusion.ase_role_vl         eff_r  ON eff_r.role_id  = rt.effective_role_id
+  -- Privileges on the effective role
+  LEFT JOIN fusion.ase_priv_role_mbr prm
+         ON prm.role_id = rt.effective_role_id
+        AND (prm.effective_end_date >= SYSDATE OR prm.effective_end_date IS NULL)
+  LEFT JOIN fusion.ase_privilege_vl  pv
+         ON pv.privilege_id = prm.privilege_id
+  LEFT JOIN fusion.ase_permission_b  perm
+         ON perm.privilege_id = prm.privilege_id
+        AND SYSDATE BETWEEN perm.effective_start_date
+                        AND NVL(perm.effective_end_date, SYSDATE)
+  -- Menu / function access granted to the effective role
+  LEFT JOIN fusion.fnd_grants g
+         ON g.grantee_key = eff_r.role_code
+        AND (g.end_date >= SYSDATE OR g.end_date IS NULL)
+  LEFT JOIN fusion.fnd_menus m
+         ON m.menu_id = g.menu_id
+  LEFT JOIN fusion.fnd_menu_entries me
+         ON me.menu_id = m.menu_id
+  LEFT JOIN fusion.fnd_form_functions ff
+         ON ff.function_id = me.function_id
+ ORDER BY u.user_display_name,
+          top_r.role_name,
+          eff_r.role_name,
+          pv.privilege_name,
+          m.menu_name,
+          ff.user_function_name;
+
+
+-- ============================================================================
+-- QUERY 13: COMPLETE VIEW FOR A SPECIFIC USER
+-- Same as Query 12 but filtered by username.
+-- Replace 'JOHN.DOE' with the target username.
+-- ============================================================================
+WITH user_roles (user_id, top_role_id) AS (
+    SELECT urm.user_id,
+           urm.role_id
+      FROM fusion.ase_user_role_mbr urm
+     WHERE (urm.effective_end_date >= SYSDATE OR urm.effective_end_date IS NULL)
+),
+role_tree (user_id, top_role_id, effective_role_id, depth) AS (
+    SELECT ur.user_id,
+           ur.top_role_id,
+           ur.top_role_id,
+           1
+      FROM user_roles ur
+    UNION ALL
+    SELECT rt.user_id,
+           rt.top_role_id,
+           rrm.child_role_id,
+           rt.depth + 1
+      FROM role_tree rt
+      JOIN fusion.ase_role_role_mbr rrm
+        ON rrm.parent_role_id = rt.effective_role_id
+     WHERE (rrm.effective_end_date >= SYSDATE OR rrm.effective_end_date IS NULL)
+       AND rt.depth < 10
+)
+SELECT DISTINCT
+       u.user_name,
+       u.user_display_name,
+       top_r.role_name                               AS assigned_role,
+       top_r.role_code                               AS assigned_role_code,
+       eff_r.role_name                               AS effective_role,
+       eff_r.role_code                               AS effective_role_code,
+       pv.privilege_name,
+       pv.privilege_code,
+       perm.resource_type_name,
+       perm.action,
+       m.menu_name                                   AS menu_name,
+       ff.function_name                              AS function_code,
+       ff.user_function_name                         AS function_display_name,
+       ff.type                                       AS function_type,
+       ff.web_html_call                              AS function_url,
+       ff.description                                AS function_description
+  FROM role_tree                  rt
+  JOIN fusion.ase_user_vl         u      ON u.user_id      = rt.user_id
+  JOIN fusion.ase_role_vl         top_r  ON top_r.role_id  = rt.top_role_id
+  JOIN fusion.ase_role_vl         eff_r  ON eff_r.role_id  = rt.effective_role_id
+  LEFT JOIN fusion.ase_priv_role_mbr prm
+         ON prm.role_id = rt.effective_role_id
+        AND (prm.effective_end_date >= SYSDATE OR prm.effective_end_date IS NULL)
+  LEFT JOIN fusion.ase_privilege_vl  pv
+         ON pv.privilege_id = prm.privilege_id
+  LEFT JOIN fusion.ase_permission_b  perm
+         ON perm.privilege_id = prm.privilege_id
+        AND SYSDATE BETWEEN perm.effective_start_date
+                        AND NVL(perm.effective_end_date, SYSDATE)
+  LEFT JOIN fusion.fnd_grants g
+         ON g.grantee_key = eff_r.role_code
+        AND (g.end_date >= SYSDATE OR g.end_date IS NULL)
+  LEFT JOIN fusion.fnd_menus m
+         ON m.menu_id = g.menu_id
+  LEFT JOIN fusion.fnd_menu_entries me
+         ON me.menu_id = m.menu_id
+  LEFT JOIN fusion.fnd_form_functions ff
+         ON ff.function_id = me.function_id
+ WHERE u.user_name = 'JOHN.DOE'   -- <<< Replace with the target username
+ ORDER BY top_r.role_name,
+          eff_r.role_name,
+          pv.privilege_name,
+          m.menu_name,
+          ff.user_function_name;
+
+
+-- ============================================================================
+-- QUERY 14: ROLE-ONLY VIEW - Role, Privilege, Menu & Function (No User Filter)
+-- Useful when you just want to see what a specific ROLE grants, without
+-- tying it to a user. Shows the role's inherited duty roles, their
+-- privileges, actions, and menu/function access.
+--
+-- Replace the role_code value as needed.
+-- ============================================================================
+WITH role_tree (top_role_id, effective_role_id, role_path, depth) AS (
+    SELECT r.role_id,
+           r.role_id,
+           r.role_name,
+           1
+      FROM fusion.ase_role_vl r
+     WHERE r.role_code = 'ORA_GL_GENERAL_ACCOUNTANT_JOB'  -- <<< Replace
+    UNION ALL
+    SELECT rt.top_role_id,
+           rrm.child_role_id,
+           rt.role_path || ' > ' || cr.role_name,
+           rt.depth + 1
+      FROM role_tree rt
+      JOIN fusion.ase_role_role_mbr rrm
+        ON rrm.parent_role_id = rt.effective_role_id
+      JOIN fusion.ase_role_vl cr
+        ON cr.role_id = rrm.child_role_id
+     WHERE (rrm.effective_end_date >= SYSDATE OR rrm.effective_end_date IS NULL)
+       AND rt.depth < 10
+)
+SELECT DISTINCT
+       top_r.role_name                               AS job_role,
+       top_r.role_code                               AS job_role_code,
+       eff_r.role_name                               AS effective_role,
+       eff_r.role_code                               AS effective_role_code,
+       rt.role_path                                  AS inheritance_path,
+       pv.privilege_name,
+       pv.privilege_code,
+       perm.resource_type_name,
+       perm.action,
+       m.menu_name                                   AS menu_name,
+       ff.function_name                              AS function_code,
+       ff.user_function_name                         AS function_display_name,
+       ff.type                                       AS function_type,
+       ff.web_html_call                              AS function_url
+  FROM role_tree rt
+  JOIN fusion.ase_role_vl         top_r  ON top_r.role_id  = rt.top_role_id
+  JOIN fusion.ase_role_vl         eff_r  ON eff_r.role_id  = rt.effective_role_id
+  LEFT JOIN fusion.ase_priv_role_mbr prm
+         ON prm.role_id = rt.effective_role_id
+        AND (prm.effective_end_date >= SYSDATE OR prm.effective_end_date IS NULL)
+  LEFT JOIN fusion.ase_privilege_vl  pv
+         ON pv.privilege_id = prm.privilege_id
+  LEFT JOIN fusion.ase_permission_b  perm
+         ON perm.privilege_id = prm.privilege_id
+        AND SYSDATE BETWEEN perm.effective_start_date
+                        AND NVL(perm.effective_end_date, SYSDATE)
+  LEFT JOIN fusion.fnd_grants g
+         ON g.grantee_key = eff_r.role_code
+        AND (g.end_date >= SYSDATE OR g.end_date IS NULL)
+  LEFT JOIN fusion.fnd_menus m
+         ON m.menu_id = g.menu_id
+  LEFT JOIN fusion.fnd_menu_entries me
+         ON me.menu_id = m.menu_id
+  LEFT JOIN fusion.fnd_form_functions ff
+         ON ff.function_id = me.function_id
+ ORDER BY rt.role_path,
+          pv.privilege_name,
+          m.menu_name,
+          ff.user_function_name;
