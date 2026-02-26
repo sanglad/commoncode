@@ -222,6 +222,9 @@ SELECT DISTINCT
 -- ============================================================================
 -- QUERY 7: Data Security Grants (FND_GRANTS)
 -- Shows who can do what on which data objects via data security policies.
+--
+-- FND_FORM_FUNCTIONS base table has: FUNCTION_ID, FUNCTION_NAME
+-- FND_FORM_FUNCTIONS_TL has: USER_FUNCTION_NAME, DESCRIPTION (translated)
 -- ============================================================================
 SELECT g.grantee_key,
        g.grantee_type,
@@ -231,7 +234,8 @@ SELECT g.grantee_key,
        m.menu_name                               AS aggregate_privilege,
        me.function_id,
        ff.function_name                          AS function_privilege,
-       ff.user_function_name                     AS function_display_name,
+       fft.user_function_name                    AS function_display_name,
+       fft.description                           AS function_description,
        g.start_date,
        g.end_date
   FROM fusion.fnd_grants          g
@@ -239,6 +243,9 @@ SELECT g.grantee_key,
   LEFT JOIN fusion.fnd_menus      m    ON m.menu_id       = g.menu_id
   LEFT JOIN fusion.fnd_menu_entries me ON me.menu_id      = g.menu_id
   LEFT JOIN fusion.fnd_form_functions ff ON ff.function_id = me.function_id
+  LEFT JOIN fusion.fnd_form_functions_tl fft
+         ON fft.function_id = ff.function_id
+        AND fft.language    = USERENV('LANG')
  WHERE (g.end_date >= SYSDATE OR g.end_date IS NULL)
  ORDER BY g.grantee_key, obj.obj_name, ff.function_name;
 
@@ -266,28 +273,41 @@ SELECT g.grantee_key,
 -- Lists every task (function) inside the "General Accounting" navigator
 -- menu group by walking the FND_MENUS / FND_MENU_ENTRIES hierarchy.
 -- If your menu group has a different name, adjust the WHERE clause.
+--
+-- Uses base tables only (no _VL views which may not exist in SaaS):
+--   FND_MENUS          + FND_MENUS_TL          for menu names
+--   FND_MENU_ENTRIES                            for the hierarchy
+--   FND_FORM_FUNCTIONS + FND_FORM_FUNCTIONS_TL  for function details
 -- ============================================================================
 SELECT LEVEL                                         AS menu_depth,
-       LPAD(' ', (LEVEL - 1) * 3) || fmev.prompt    AS task_name,
-       fmev.entry_sequence,
-       fmev.description                              AS task_description,
-       fffv.function_name                            AS function_code,
-       fffv.user_function_name                       AS function_display_name,
-       fffv.type                                     AS function_type,
-       sub_menu.user_menu_name                       AS sub_menu_name
-  FROM fusion.fnd_menu_entries_vl  fmev
-  LEFT JOIN fusion.fnd_form_functions_vl fffv
-         ON fffv.function_id = fmev.function_id
-  LEFT JOIN fusion.fnd_menus_vl    sub_menu
-         ON sub_menu.menu_id = fmev.sub_menu_id
- START WITH fmev.menu_id IN (
-       SELECT fmv.menu_id
-         FROM fusion.fnd_menus_vl fmv
-        WHERE UPPER(fmv.user_menu_name) LIKE '%GENERAL ACCOUNTING%'
-           OR UPPER(fmv.menu_name)      LIKE '%GENERAL_ACCOUNTING%'
+       me.entry_sequence,
+       ff.function_name                              AS function_code,
+       fft.user_function_name                        AS function_display_name,
+       fft.description                               AS function_description,
+       sub_mt.menu_name                              AS sub_menu_code,
+       sub_mtl.user_menu_name                        AS sub_menu_name
+  FROM fusion.fnd_menu_entries       me
+  LEFT JOIN fusion.fnd_form_functions ff
+         ON ff.function_id = me.function_id
+  LEFT JOIN fusion.fnd_form_functions_tl fft
+         ON fft.function_id = ff.function_id
+        AND fft.language    = USERENV('LANG')
+  LEFT JOIN fusion.fnd_menus         sub_mt
+         ON sub_mt.menu_id = me.sub_menu_id
+  LEFT JOIN fusion.fnd_menus_tl      sub_mtl
+         ON sub_mtl.menu_id = me.sub_menu_id
+        AND sub_mtl.language = USERENV('LANG')
+ START WITH me.menu_id IN (
+       SELECT fm.menu_id
+         FROM fusion.fnd_menus    fm
+         JOIN fusion.fnd_menus_tl fmt
+           ON fmt.menu_id  = fm.menu_id
+          AND fmt.language = USERENV('LANG')
+        WHERE UPPER(fmt.user_menu_name) LIKE '%GENERAL ACCOUNTING%'
+           OR UPPER(fm.menu_name)       LIKE '%GENERAL_ACCOUNTING%'
  )
- CONNECT BY PRIOR fmev.sub_menu_id = fmev.menu_id
- ORDER SIBLINGS BY fmev.entry_sequence;
+ CONNECT BY PRIOR me.sub_menu_id = me.menu_id
+ ORDER SIBLINGS BY me.entry_sequence;
 
 
 -- ============================================================================
@@ -497,6 +517,9 @@ SELECT DISTINCT
 --   * The privilege name, code, and permitted action
 --   * The menu (aggregate privilege) granted to that role via FND_GRANTS
 --   * Each function/page inside that menu the user can reach
+--
+-- FND_FORM_FUNCTIONS      -> FUNCTION_ID, FUNCTION_NAME (base table)
+-- FND_FORM_FUNCTIONS_TL   -> USER_FUNCTION_NAME, DESCRIPTION (translations)
 -- ============================================================================
 WITH user_roles (user_id, top_role_id) AS (
     SELECT urm.user_id,
@@ -524,29 +547,22 @@ role_tree (user_id, top_role_id, effective_role_id, depth) AS (
 SELECT DISTINCT
        u.user_name,
        u.user_display_name,
-       -- Role info
        top_r.role_name                               AS assigned_role,
        top_r.role_code                               AS assigned_role_code,
        eff_r.role_name                               AS effective_role,
        eff_r.role_code                               AS effective_role_code,
-       -- Privilege & action
        pv.privilege_name,
        pv.privilege_code,
        perm.resource_type_name,
        perm.action,
-       -- Menu access (aggregate privilege)
        m.menu_name                                   AS menu_name,
-       -- Function / page details
        ff.function_name                              AS function_code,
-       ff.user_function_name                         AS function_display_name,
-       ff.type                                       AS function_type,
-       ff.web_html_call                              AS function_url,
-       ff.description                                AS function_description
+       fft.user_function_name                        AS function_display_name,
+       fft.description                               AS function_description
   FROM role_tree                  rt
   JOIN fusion.ase_user_vl         u      ON u.user_id      = rt.user_id
   JOIN fusion.ase_role_vl         top_r  ON top_r.role_id  = rt.top_role_id
   JOIN fusion.ase_role_vl         eff_r  ON eff_r.role_id  = rt.effective_role_id
-  -- Privileges on the effective role
   LEFT JOIN fusion.ase_priv_role_mbr prm
          ON prm.role_id = rt.effective_role_id
         AND (prm.effective_end_date >= SYSDATE OR prm.effective_end_date IS NULL)
@@ -556,7 +572,6 @@ SELECT DISTINCT
          ON perm.privilege_id = prm.privilege_id
         AND SYSDATE BETWEEN perm.effective_start_date
                         AND NVL(perm.effective_end_date, SYSDATE)
-  -- Menu / function access granted to the effective role
   LEFT JOIN fusion.fnd_grants g
          ON g.grantee_key = eff_r.role_code
         AND (g.end_date >= SYSDATE OR g.end_date IS NULL)
@@ -566,12 +581,15 @@ SELECT DISTINCT
          ON me.menu_id = m.menu_id
   LEFT JOIN fusion.fnd_form_functions ff
          ON ff.function_id = me.function_id
+  LEFT JOIN fusion.fnd_form_functions_tl fft
+         ON fft.function_id = ff.function_id
+        AND fft.language    = USERENV('LANG')
  ORDER BY u.user_display_name,
           top_r.role_name,
           eff_r.role_name,
           pv.privilege_name,
           m.menu_name,
-          ff.user_function_name;
+          fft.user_function_name;
 
 
 -- ============================================================================
@@ -615,10 +633,8 @@ SELECT DISTINCT
        perm.action,
        m.menu_name                                   AS menu_name,
        ff.function_name                              AS function_code,
-       ff.user_function_name                         AS function_display_name,
-       ff.type                                       AS function_type,
-       ff.web_html_call                              AS function_url,
-       ff.description                                AS function_description
+       fft.user_function_name                        AS function_display_name,
+       fft.description                               AS function_description
   FROM role_tree                  rt
   JOIN fusion.ase_user_vl         u      ON u.user_id      = rt.user_id
   JOIN fusion.ase_role_vl         top_r  ON top_r.role_id  = rt.top_role_id
@@ -641,12 +657,15 @@ SELECT DISTINCT
          ON me.menu_id = m.menu_id
   LEFT JOIN fusion.fnd_form_functions ff
          ON ff.function_id = me.function_id
+  LEFT JOIN fusion.fnd_form_functions_tl fft
+         ON fft.function_id = ff.function_id
+        AND fft.language    = USERENV('LANG')
  WHERE u.user_name = 'JOHN.DOE'   -- <<< Replace with the target username
  ORDER BY top_r.role_name,
           eff_r.role_name,
           pv.privilege_name,
           m.menu_name,
-          ff.user_function_name;
+          fft.user_function_name;
 
 
 -- ============================================================================
@@ -689,9 +708,8 @@ SELECT DISTINCT
        perm.action,
        m.menu_name                                   AS menu_name,
        ff.function_name                              AS function_code,
-       ff.user_function_name                         AS function_display_name,
-       ff.type                                       AS function_type,
-       ff.web_html_call                              AS function_url
+       fft.user_function_name                        AS function_display_name,
+       fft.description                               AS function_description
   FROM role_tree rt
   JOIN fusion.ase_role_vl         top_r  ON top_r.role_id  = rt.top_role_id
   JOIN fusion.ase_role_vl         eff_r  ON eff_r.role_id  = rt.effective_role_id
@@ -713,7 +731,10 @@ SELECT DISTINCT
          ON me.menu_id = m.menu_id
   LEFT JOIN fusion.fnd_form_functions ff
          ON ff.function_id = me.function_id
+  LEFT JOIN fusion.fnd_form_functions_tl fft
+         ON fft.function_id = ff.function_id
+        AND fft.language    = USERENV('LANG')
  ORDER BY rt.role_path,
           pv.privilege_name,
           m.menu_name,
-          ff.user_function_name;
+          fft.user_function_name;
